@@ -1,16 +1,11 @@
-"""
-Useful functions for spatial interpolation methods of tobler
-"""
+"""Useful functions to support tobler's interpolation methods."""
 
-import math
 from warnings import warn
 
 import geopandas
 import numpy as np
 import pandas
-from pyproj import CRS
 from shapely.geometry import Polygon
-
 
 
 def circumradius(resolution):
@@ -20,7 +15,7 @@ def circumradius(resolution):
     ----------
     resolution : int
         h3 grid resolution
-    
+
     Returns
     -------
     circumradius : float
@@ -35,8 +30,7 @@ def circumradius(resolution):
             "`pip install h3`"
         )
 
-    cr = h3.edge_length(resolution)
-    return 1000 * cr
+    return h3.edge_length(resolution, "m")
 
 
 def _check_crs(source_df, target_df):
@@ -79,7 +73,6 @@ def _check_presence_of_crs(geoinput):
         raise KeyError("Geodataframe must have a CRS set before using this function.")
 
 
-
 def h3fy(source, resolution=6, clip=False, buffer=False, return_geoms=True):
     """Generate a hexgrid geodataframe that covers the face of a source geodataframe.
 
@@ -115,16 +108,37 @@ def h3fy(source, resolution=6, clip=False, buffer=False, return_geoms=True):
     orig_crs = source.crs
     clipper = source
 
-    if not source.crs.is_geographic:
-        if buffer:
+    if source.crs.is_geographic:
+        if buffer:  # if CRS is geographic but user wants a buffer, we need to estimate
+            warn(
+                "The source geodataframe is stored in a geographic CRS. Falling back to estimated UTM zone "
+                "to generate desired buffer. If this produces unexpected results, reproject the input data "
+                "prior to using this function"
+            )
+            source = (
+                source.to_crs(source.estimate_utm_crs())
+                .buffer(circumradius(resolution))
+                .to_crs(4326)
+            )
+
+    else:  # if CRS is projected, we need lat/long
+        crs_units = source.crs.to_dict()["units"]
+        if buffer:  #  we can only convert between units we know
+            if not crs_units in ["m", "us-ft"]:
+                raise ValueError(
+                    f"The CRS of source geodataframe uses an unknown measurement unit: `{crs_units}`. "
+                    "The `buffer` argument requires either a geographic CRS or a projected one measured "
+                    "in meters or feet (U.S.)"
+                )
             clipper = source.to_crs(4326)
             distance = circumradius(resolution)
+            if crs_units == "ft-us":
+                distance = distance * 3.281
             source = source.buffer(distance).to_crs(4326)
         else:
             source = source.to_crs(4326)
 
     source_unary = source.unary_union
-
 
     if type(source_unary) == Polygon:
         hexagons = _to_hex(
@@ -135,7 +149,7 @@ def h3fy(source, resolution=6, clip=False, buffer=False, return_geoms=True):
         for geom in source_unary.geoms:
             hexes = _to_hex(geom, resolution=resolution, return_geoms=return_geoms)
             output.append(hexes)
-            hexagons = pandas.concat(output)
+        hexagons = pandas.concat(output)
 
     if return_geoms and clip:
         hexagons = geopandas.clip(hexagons, clipper)
@@ -175,8 +189,6 @@ def _to_hex(source, resolution=6, return_geoms=True, buffer=True):
             "`pip install h3`"
         )
 
-
-
     hexids = pandas.Series(
         list(
             h3.polyfill(
@@ -187,10 +199,9 @@ def _to_hex(source, resolution=6, return_geoms=True, buffer=True):
         ),
         name="hex_id",
     )
-        
+
     if not return_geoms:
         return hexids
-
 
     polys = hexids.apply(
         lambda hex_id: Polygon(h3.h3_to_geo_boundary(hex_id, geo_json=True)),
